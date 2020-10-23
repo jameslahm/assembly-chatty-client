@@ -22,6 +22,20 @@ include comdlg32.inc
 includelib comdlg32.lib 
 include gdi32.inc
 includelib gdi32.lib
+include wsock32.inc
+includelib wsock32.lib
+
+
+includelib      msvcrt.lib
+printf          PROTO C :ptr sbyte, :VARARG
+scanf           PROTO C :ptr sbyte, :VARARG
+sscanf          PROTO C :ptr byte,:ptr sbyte,:VARARG
+sprintf         PROTO C :ptr byte,:ptr sbyte,:VARARG
+srand           PROTO C :dword
+rand            PROTO C
+time	        PROTO C :ptr dword
+
+
 
 ; 常量定义
 WINDOW_WIDTH = 1020
@@ -53,6 +67,14 @@ SEND_IMAGE_BUTTON_ID = 1003
 
 ;==================== DATA =======================
 .data
+; WSAData init
+wsaData WSADATA <>
+wVersion WORD 0202h
+
+; logs print format
+debugFormat BYTE "DEBUG!!",0dh,0ah,0
+debugStrFormat BYTE "DEBUG %s",0dh,0ah,0
+debugNumFormat BYTE "DEBUG %d",0dh,0ah,0
 
 AppLoadMsgTitle BYTE "Application Loaded",0
 AppLoadMsgText  BYTE "This window displays when the WM_CREATE "
@@ -71,6 +93,8 @@ CloseMsg   BYTE "WM_CLOSE message received",0
 ErrorTitle  BYTE "Error",0
 WindowName  BYTE "ASM Windows App",0
 className   BYTE "ASMWin",0
+
+localIP BYTE "127.0.0.1",0
 
 ; Define the Application's Window class structure.
 MainWin WNDCLASS <NULL,WinProc,NULL,NULL,NULL,NULL,NULL, \
@@ -128,14 +152,30 @@ hSendImageButton DWORD ?
 
 ; 打开图片
 fileNameStruct   OPENFILENAME <> 
-filterString BYTE "Images",0,"*.bmp",0
+filterString BYTE "Images",0,"*.bmp;*.png",0
 fileNameBuf BYTE BUF_SIZE DUP(0)
 hBitmap DWORD ?
+
+; 请求
+loginRequestFormat BYTE "LOGIN %s %s",0dh,0ah,0
 
 
 User STRUCT
 	id DWORD ?
+	username BYTE 30 DUP(0)
 User ENDS
+
+
+Client STRUCT
+	clientSocket DWORD -1;
+	user User<>
+Client ENDS
+; 客户端常量
+client Client<>
+
+BZero MACRO buf:=<buf>,bufSize:=<BUF_SIZE>
+	INVOKE RtlZeroMemory,addr buf,bufSize
+ENDM
 
 ;=================== CODE =========================
 .code
@@ -250,7 +290,62 @@ sendImage PROC hWnd:DWORD
 	ret 
 sendImage ENDP
 
+handleLogin PROC hWnd:DWORD
+	local loginRequestBuf[BUF_SIZE]:BYTE
+
+	BZero loginRequestBuf
+
+	INVOKE GetWindowText,hUsernameInput,addr usernameBuf,BUF_SIZE
+	INVOKE GetWindowText,hPasswordInput,addr passwordBuf,BUF_SIZE
+			
+	INVOKE DestroyWindow,hUsernameInput
+	INVOKE DestroyWindow,hPasswordInput
+	INVOKE DestroyWindow,hUsernameLabel
+	INVOKE DestroyWindow,hPasswordLabel
+	INVOKE DestroyWindow,hLoginButton
+
+	invoke sprintf,addr loginRequestBuf,addr loginRequestFormat,addr usernameBuf,addr passwordBuf
+	
+	invoke lstrlen,addr loginRequestBuf
+	invoke send,client.clientSocket,addr loginRequestBuf,eax,0
+
+
+	mov SCENE,1
+
+
+
+	; 初始化好友列表
+	INVOKE initFriendsList,hWnd
+	ret
+handleLogin ENDP
+
+
+initClient PROC
+	local @sock_addr:sockaddr_in
+
+	invoke WSAStartup,wVersion,addr wsaData
+
+	invoke socket,AF_INET,SOCK_STREAM,IPPROTO_TCP
+	.if eax == INVALID_SOCKET
+		invoke WSAGetLastError
+		invoke printf ,addr debugNumFormat,eax
+	.ENDIF
+
+
+	mov client.clientSocket,eax
+	invoke RtlZeroMemory,addr @sock_addr,sizeof @sock_addr
+
+	PORT = 5000
+	invoke htons,PORT
+	mov @sock_addr.sin_port,ax
+	mov @sock_addr.sin_family,AF_INET
+	invoke inet_addr,addr localIP
+	mov @sock_addr.sin_addr,eax
+	invoke connect,client.clientSocket,addr @sock_addr,sizeof @sock_addr
+initClient ENDP
+
 WinMain PROC
+	;invoke initClient
 ; Get a handle to the current process.
 	INVOKE GetModuleHandle, NULL
 
@@ -307,6 +402,8 @@ Exit_Program:
 	  INVOKE ExitProcess,0
 WinMain ENDP
 
+
+
 ;-----------------------------------------------------
 WinProc PROC,
 	hWnd:DWORD, localMsg:DWORD, wParam:DWORD, lParam:DWORD
@@ -354,19 +451,8 @@ WinProc PROC,
 	.ELSEIF eax == WM_COMMAND
 		mov ebx,wParam
 		.IF bx == LOGIN_BUTTON_ID
-			INVOKE GetWindowText,hUsernameInput,addr usernameBuf,BUF_SIZE
-			INVOKE GetWindowText,hPasswordInput,addr passwordBuf,BUF_SIZE
+			invoke handleLogin,hWnd
 			
-			INVOKE DestroyWindow,hUsernameInput
-			INVOKE DestroyWindow,hPasswordInput
-			INVOKE DestroyWindow,hUsernameLabel
-			INVOKE DestroyWindow,hPasswordLabel
-			INVOKE DestroyWindow,hLoginButton
-
-			mov SCENE,1
-
-			; 初始化好友列表
-			INVOKE initFriendsList,hWnd
 		.ELSEIF bx == SEND_IMAGE_BUTTON_ID
 			INVOKE sendImage,hWnd
 		.ENDIF
