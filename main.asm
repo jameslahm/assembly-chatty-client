@@ -47,8 +47,29 @@ CHAT_WINDOW_HEIGHT = 900
 CHAT_INPUT_HEIGHT = 50
 CHAT_INPUT_WIDTH = 500
 CHAT_SEND_BUTTON_WIDTH = 100
+MESSAGE_HEIGHT = 40
 
 BUF_SIZE = 512
+
+User STRUCT
+	id DWORD -1
+	username BYTE BUF_SIZE DUP(0)
+User ENDS
+
+
+Client STRUCT
+	clientSocket DWORD -1;
+	user User<>
+Client ENDS
+
+
+BZero MACRO buf:=<buf>,bufSize:=<BUF_SIZE>
+	INVOKE RtlZeroMemory,addr buf,bufSize
+ENDM
+
+Debug MACRO buf:=<buf>
+	INVOKE MessageBox,hWnd,addr buf,addr WindowName,MB_OK
+ENDM
 
 ; 宏定义
 RGB macro red,green,blue
@@ -64,9 +85,13 @@ LOGIN_BUTTON_ID = 1000
 FRIENDS_LIST_ID = 1001
 SEND_BUTTON_ID = 1002
 SEND_IMAGE_BUTTON_ID = 1003
+TIMER_ID = 1004
 
 ;==================== DATA =======================
 .data
+; 客户端常量
+client Client<>
+
 ; WSAData init
 wsaData WSADATA <>
 wVersion WORD 0202h
@@ -134,7 +159,7 @@ hLoginButton DWORD ?
 ; 好友列表
 friendsListText BYTE "Friends",0
 hFriendsList DWORD ?
-friendName BYTE "zhangzhi",0
+friends User 50 DUP(<>)
 
 ; 聊天窗口
 message1 BYTE "Hello",0
@@ -150,39 +175,130 @@ hSendButton DWORD ?
 SendImageButtonText BYTE "Send Image",0
 hSendImageButton DWORD ?
 
+; command constants
+REGISTER_COMMAND BYTE "REGISTER",0
+LOGIN_COMMAND BYTE "LOGIN",0
+SEND_TEXT_COMMAND BYTE "TEXT",0
+SEND_IMAGE_COMMAND BYTE "IMAGE",0
+GET_FRIENDS_COMMAND BYTE "FRIENDS",0
+ADD_FRIEND_COMMAND BYTE "ADDFRIEND",0
+GET_MESSAGES_COMMAND BYTE "MESSAGES",0
+GET_USERS_COMMAND BYTE "USERS",0
+GET_LASTMESSAGES_COMMAND BYTE "LASTMESSAGES",0
+
+; 请求
+loginRequestFormat BYTE "LOGIN %s %s",0dh,0ah,0
+getFriendsRequestFormat BYTE "FRIENDS",0dh,0ah,0
+getMessagesRequestFormat BYTE "MESSAGES %d",0dh,0ah,0
+getLastMessagesRequestFormat BYTE "LASTMESSAGES %d",0dh,0ah,0
+sendTextRequestFormat BYTE "TEXT %d %s",0dh,0ah,0
+sendImageRequestFormat BYTE "IMAGE %d %d",0dh,0ah,0
+
+; 响应
+successResponse BYTE "SUCCESS",0dh,0ah,0
+successResponseLen DWORD 9
+failureResponse BYTE "ERROR",0dh,0ah,0
+failureResponseLen DWORD 7
+friendsNumResponseFormat BYTE "FRIENDS %d",0dh,0ah,0
+friendsResponseFormat BYTE "%d %s",0dh,0ah,0
+usersNumResponseFormat BYTE "USERS %d",0dh,0ah,0
+usersResponseFormat BYTE "%d %s",0dh,0ah,0
+
+messagesNumResponseFormat BYTE "MESSAGES %d",0dh,0ah,0
+textResponseFormat BYTE "TEXT %s",0dh,0ah,0
+imageResponseFormat BYTE "IMAGE %d",0dh,0ah,0
+
+; 提示信息
+loginSuccessInfo BYTE "Login Successful",0
+
+toNumFormat BYTE "%d",0
+toStrFormat BYTE "%s",0
+toNumStrFormat BYTE "%d %s",0
+
+; 文本消息地址
+messages DWORD 100 DUP(-1)
+
 ; 打开图片
 fileNameStruct   OPENFILENAME <> 
 filterString BYTE "Images",0,"*.bmp;*.png",0
 fileNameBuf BYTE BUF_SIZE DUP(0)
 hBitmap DWORD ?
 
-; 请求
-loginRequestFormat BYTE "LOGIN %s %s",0dh,0ah,0
+Image struct 
+	imageName BYTE BUF_SIZE DUP(0)
+	height    DWORD -1
+ends
 
+sendImages Image 20 DUP(<>)
+recvImages Image 20 DUP(<>)
 
-User STRUCT
-	id DWORD ?
-	username BYTE 30 DUP(0)
-User ENDS
+currentMessageHeight DWORD 0
 
+; 当前接收者
+receiverId DWORD 0
 
-Client STRUCT
-	clientSocket DWORD -1;
-	user User<>
-Client ENDS
-; 客户端常量
-client Client<>
-
-BZero MACRO buf:=<buf>,bufSize:=<BUF_SIZE>
-	INVOKE RtlZeroMemory,addr buf,bufSize
-ENDM
 
 ;=================== CODE =========================
 .code
+generateRandomImageName PROC buf:ptr BYTE
+	local count:sdword
+	mov count,10
+
+	invoke time,NULL
+	invoke srand,eax
+		
+	.while count>=1
+		invoke rand
+		mov edx,0
+		mov ecx,26
+		div ecx
+		mov eax,edx
+		add eax,61h
+		
+		mov ecx,buf
+
+		mov edx,count
+		mov ebx,10
+		sub ebx,edx
+		mov [ecx+ebx],al
+
+		dec count
+	.endw
+	ret
+generateRandomImageName ENDP
+
+
+initFriend PROC friendIdAddr:PTR DWORD,friendNameAddr:ptr byte
+	mov eax,offset friends
+	assume eax:ptr User
+	.WHILE TRUE
+		.if [eax].id == -1
+			mov ebx,friendIdAddr
+			push [ebx]
+			pop [eax].id
+
+			invoke lstrcpy,addr [eax].username,friendNameAddr
+
+			assume eax:nothing
+			.BREAK
+		.else
+			add eax,sizeof User
+		.endif
+	.ENDW
+	ret
+initFriend ENDP
+
+
 ; 初始化好友列表
 initFriendsList PROC hWnd:DWORD
 	LOCAL lvc:LV_COLUMN
 	LOCAL lvi:LV_ITEM
+	local responseBuf[BUF_SIZE]:BYTE
+	local friendsNum:DWORD
+	local friendId:DWORD
+	local friendName[BUF_SIZE]:DWORD
+
+	BZero responseBuf
 
 	invoke CreateWindowEx, NULL, addr ListClassName, NULL, LVS_REPORT+WS_CHILD+WS_VISIBLE, 0,0,300,CLIENT_HEIGHT,hWnd, FRIENDS_LIST_ID, hInstance, NULL
     mov hFriendsList, eax
@@ -192,32 +308,257 @@ initFriendsList PROC hWnd:DWORD
 	mov lvc.lx,300
 	invoke SendMessage,hFriendsList, LVM_INSERTCOLUMN, 0, addr lvc
 
-	mov lvi.imask,LVIF_TEXT+LVIF_PARAM
-	mov lvi.iItem,0
-	mov lvi.iSubItem,0
-	mov lvi.pszText,offset friendName
-	invoke SendMessage,hFriendsList, LVM_INSERTITEM,0, addr lvi
+	invoke lstrlen,addr getFriendsRequestFormat
 
-	mov lvi.imask,LVIF_TEXT+LVIF_PARAM
-	mov lvi.iItem,1
-	mov lvi.iSubItem,0
-	mov lvi.pszText,offset friendName
-	invoke SendMessage,hFriendsList, LVM_INSERTITEM,0, addr lvi
+	invoke send,client.clientSocket,addr getFriendsRequestFormat,eax,0
 
-	mov lvi.imask,LVIF_TEXT+LVIF_PARAM
-	mov lvi.iItem,2
-	mov lvi.iSubItem,0
-	mov lvi.pszText,offset friendName
-	invoke SendMessage,hFriendsList, LVM_INSERTITEM,0, addr lvi
+	invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
+	Debug responseBuf
+
+	invoke sscanf,addr responseBuf,addr friendsNumResponseFormat,addr friendsNum
+
+	mov ecx,1
+	.while ecx <= friendsNum
+		push ecx
+		BZero responseBuf
+		BZero friendName
+		invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
+
+		Debug responseBuf
+
+		invoke sscanf,addr responseBuf,addr friendsResponseFormat,addr friendId,addr friendName
+
+		invoke initFriend,addr friendId,addr friendName
+		pop ecx
+		inc ecx
+	.endw
+
+	mov eax,offset friends
+	assume eax:ptr User
+	.while TRUE
+		.if [eax].id != -1
+			mov lvi.imask,LVIF_TEXT+LVIF_PARAM
+			mov lvi.iItem,0
+			mov lvi.iSubItem,0
+			lea ebx,[eax].username
+			mov lvi.pszText,ebx
+			push eax
+			invoke SendMessage,hFriendsList, LVM_INSERTITEM,0, addr lvi
+			pop eax
+			add eax,sizeof User
+		.else
+			.break
+		.endif
+	.endw
 	ret
 initFriendsList ENDP
 
+addSendImage PROC bufAddr:DWORD,height:DWORD
+	mov eax,offset sendImages
+	.WHILE TRUE
+		assume eax:ptr Image
+		push eax
+		invoke lstrlen,addr [eax].imageName
+		mov ebx,eax
+		pop eax
+		.if ebx==0
+			push eax
+			invoke lstrcpy,addr [eax].imageName,bufAddr
+			pop eax
+			
+			push height
+			pop [eax].height
+		.endif
+		.else
+			add eax,sizeof Image
+		.endif
+	.endw
+	ret
+addSendImage ENDP
+
+addRecvImage PROC bufAddr:DWORD
+	mov eax,offset recvImages
+	.WHILE TRUE
+		assume eax:ptr Image
+		push eax
+		invoke lstrlen,addr [eax].imageName
+		mov ebx,eax
+		pop eax
+		.if ebx==0
+			push eax
+			invoke lstrcpy,addr [eax].imageName,bufAddr
+			pop eax
+			
+			push height
+			pop [eax].height
+		.endif
+		.else
+			add eax,sizeof Image
+		.endif
+	.endw
+	ret
+addRecvImage ENDP
+
+
+
 initChatWindow PROC hWnd:DWORD,friendId:DWORD
-	INVOKE CreateWindowEx,NULL,addr StaticClassName,addr message1,
-	  WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE,FRIENDS_LIST_WIDTH,0,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,40,hWnd,NULL,hInstance,NULL
-	 
-	INVOKE CreateWindowEx,NULL,addr StaticClassName,addr message2,
-	  WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE OR SS_RIGHT,FRIENDS_LIST_WIDTH,50,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,40,hWnd,NULL,hInstance,NULL
+	local getMessagesRequestBuf[BUF_SIZE]:BYTE
+	local responseBuf[BUF_SIZE]:BYTE
+	local commandType[BUF_SIZE]:BYTE
+	local row:DWORD
+	local messageAddr:DWORD
+	local imageSize:DWORD
+	local imageBuf[BUF_SIZE]:BYTE
+	local imageName[BUF_SIZE]:BYTE
+	local fileHandle:DWORD
+	local hasReceivedSize:DWORD
+
+	BZero commandType
+	mov row,0
+	mov receiverId,friendId
+
+	BZero getMessagesRequestBuf
+	invoke sprintf,addr getMessagesRequestBuf,addr getMessagesRequestFormat,friendId
+
+	invoke lstrlen,addr getMessagesRequestBuf
+	mov ecx,eax
+
+	GetClient
+	mov ebx,[eax].clientSocket
+	invoke send,ebx,addr getMessagesRequestBuf,ecx,0
+
+	BZero responseBuf
+	GetClient
+	mov ebx,[eax].clientSocket
+	invoke recv,ebx,addr responseBuf,BUF_SIZE-1,0
+
+	invoke sscanf,addr responseBuf,addr messagesNumResponseFormat,addr commandType,addr row
+
+	mov ecx,1
+	.while ecx <= row
+		BZero responseBuf
+
+		GetClient
+		mov ebx,[eax].clientSocket
+		invoke recv,ebx,addr responseBuf,BUF_SIZE-1,0
+
+		BZero commandTyoe
+		invoke sscanf,addr responseBuf,addr toStrFormat,addr commandType
+
+		invoke lstrcmp,addr commandType,addr SEND_TEXT_COMMAND
+
+		.if eax==0
+				invoke HeapAlloc,hHeap,HEAP_ZERO_MEMORY,BUF_SIZE
+				mov message,eax
+
+				invoke sscanf,addr responseBuf,addr textResponseFormat,message
+
+				INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
+					WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE OR SS_RIGHT,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
+				
+				mov eax,currentMessageHeight
+				add eax,MESSAGE_HEIGHT
+				mov currentMessageHeight
+		.else
+			BZero imageName
+			invoke generateRandomImageName,addr imageName
+			invoke sscanf,addr responseBuf,addr imageResponseFormat,addr imageSize
+
+			;create image file
+			invoke CreateFile,addr imageName,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL OR FILE_FLAG_WRITE_THROUGH,0
+			mov fileHandle,eax
+
+			; start recv image content
+			mov hasReceivedSize,0
+			mov eax,imageSize
+
+			.WHILE hasReceivedSize < eax
+				push eax
+				GetClient
+				mov ebx,[eax].clientSocket
+				invoke recv,ebx,addr imageBuf,BUF_SIZE - 1,0
+				add hasReceivedSize,eax
+				mov ebx,eax
+				invoke WriteFile,fileHandle,addr imageBuf,ebx,addr bytesWrite,NULL
+				pop eax
+			.endw
+			invoke CloseHandle,fileHandle
+
+			invoke addSendImage,addr imageName,currentMessageHeight
+			mov eax,currentMessageHeight
+			add eax,MESSAGE_HEIGHT
+			mov currentMessageHeight,eax
+		.endif
+
+	.endw
+
+
+	BZero responseBuf
+	GetClient
+	mov ebx,[eax].clientSocket
+	invoke recv,ebx,addr responseBuf,BUF_SIZE-1,0
+
+	invoke sscanf,addr responseBuf,addr messagesNumResponseFormat,addr commandType,addr row
+
+	mov ecx,1
+	.while ecx <= row
+		BZero responseBuf
+
+		GetClient
+		mov ebx,[eax].clientSocket
+		invoke recv,ebx,addr responseBuf,BUF_SIZE-1,0
+
+		BZero commandTyoe
+		invoke sscanf,addr responseBuf,addr toStrFormat,addr commandType
+
+		invoke lstrcmp,addr commandType,addr SEND_TEXT_COMMAND
+
+		.if eax==0
+				invoke HeapAlloc,hHeap,HEAP_ZERO_MEMORY,BUF_SIZE
+				mov message,eax
+
+				invoke sscanf,addr responseBuf,addr textResponseFormat,message
+
+				INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
+					WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
+				
+
+		.else
+			BZero imageName
+			invoke generateRandomImageName,addr imageName
+			invoke sscanf,addr responseBuf,addr imageResponseFormat,addr imageSize
+
+			;create image file
+			invoke CreateFile,addr imageName,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL OR FILE_FLAG_WRITE_THROUGH,0
+			mov fileHandle,eax
+
+			; start recv image content
+			mov hasReceivedSize,0
+			mov eax,imageSize
+
+			.WHILE hasReceivedSize < eax
+				push eax
+				GetClient
+				mov ebx,[eax].clientSocket
+				invoke recv,ebx,addr imageBuf,BUF_SIZE - 1,0
+				add hasReceivedSize,eax
+				mov ebx,eax
+				invoke WriteFile,fileHandle,addr imageBuf,ebx,addr bytesWrite,NULL
+				pop eax
+			.endw
+			invoke CloseHandle,fileHandle
+
+			invoke addRecvImage,addr imageName,currentMessageHeight
+			mov eax,currentMessageHeight
+			add eax,MESSAGE_HEIGHT
+			mov currentMessageHeight,eax
+
+		.endif
+
+	.endw
+
+
+	INVOKE UpdateWindow, hMainWnd
 
 	ret
 initChatWindow ENDP
@@ -249,29 +590,91 @@ showImage PROC hWnd:DWORD
 	LOCAL hdc:HDC
 	LOCAL hMemDC:HDC
 	LOCAL rect:RECT;
+	local fileNameAddr:DWORD
+	local heigth:DWORD
 
-	invoke LoadImage,NULL,addr fileNameBuf,IMAGE_BITMAP,100,100,LR_LOADFROMFILE
-    mov hBitmap,eax
+	mov eax,addr sendImages
+	.while TRUE
+		push eax
+		assume eax: ptr Image
+		mov ebx,[eax].imageName
+		mov fileNameAddr,[eax].imageName
+		mov height,[eax].height
 
-	.IF eax == 0
-		INVOKE MessageBox, hWnd, ADDR fileNameBuf,
-			ADDR WindowName, MB_OK
-	.ENDIF
+		invoke lstrlen,fileNameAddr
+		.if eax==0
+			.break
+		.endif
 
-	invoke BeginPaint,hWnd,addr ps
-    mov    hdc,eax
-    invoke CreateCompatibleDC,hdc
-    mov    hMemDC,eax
-    invoke SelectObject,hMemDC,hBitmap
-    invoke GetClientRect,hWnd,addr rect
-    invoke BitBlt,hdc,FRIENDS_LIST_WIDTH,100,100,100,hMemDC,0,0,SRCCOPY
-    invoke DeleteDC,hMemDC
-    invoke EndPaint,hWnd,addr ps
+		invoke LoadImage,NULL,fileNameAddr,IMAGE_BITMAP,MESSAGE_HRIGHT,MESSAGE_HEIGHT,LR_LOADFROMFILE
+		mov hBitmap,eax
+
+		.IF eax == 0
+			INVOKE MessageBox, hWnd, fileNameAddr,
+				ADDR WindowName, MB_OK
+		.ENDIF
+
+		invoke BeginPaint,hWnd,addr ps
+		mov    hdc,eax
+		invoke CreateCompatibleDC,hdc
+		mov    hMemDC,eax
+		invoke SelectObject,hMemDC,hBitmap
+		invoke GetClientRect,hWnd,addr rect
+		invoke BitBlt,hdc,FRIENDS_LIST_WIDTH,height,MESSAGE_HEIGHT,MESSAGE_HEIGHT,hMemDC,0,0,SRCCOPY
+		invoke DeleteDC,hMemDC
+		invoke EndPaint,hWnd,addr ps
+		pop eax
+		add eax,sizeof Image
+	.endw
+
+	mov eax,addr recvImages
+	.while TRUE
+		push eax
+		assume eax: ptr Image
+		mov ebx,[eax].imageName
+		mov fileNameAddr,[eax].imageName
+		mov height,[eax].height
+
+		invoke lstrlen,fileNameAddr
+		.if eax==0
+			.break
+		.endif
+
+		invoke LoadImage,NULL,fileNameAddr,IMAGE_BITMAP,MESSAGE_HRIGHT,MESSAGE_HEIGHT,LR_LOADFROMFILE
+		mov hBitmap,eax
+
+		.IF eax == 0
+			INVOKE MessageBox, hWnd, fileNameAddr,
+				ADDR WindowName, MB_OK
+		.ENDIF
+
+		invoke BeginPaint,hWnd,addr ps
+		mov    hdc,eax
+		invoke CreateCompatibleDC,hdc
+		mov    hMemDC,eax
+		invoke SelectObject,hMemDC,hBitmap
+		invoke GetClientRect,hWnd,addr rect
+		invoke BitBlt,hdc,FRIENDS_LIST_WIDTH,height,MESSAGE_HEIGHT,MESSAGE_HEIGHT,hMemDC,0,0,SRCCOPY
+		invoke DeleteDC,hMemDC
+		invoke EndPaint,hWnd,addr ps
+		pop eax
+		add eax,sizeof Image
+	.endw
 
 	ret
 showImage ENDP
 
 sendImage PROC hWnd:DWORD
+	local requestBuf[BUF_SIZE]:BYTE
+	local responseBuf[BUF_SIZE]:BYTE
+	local fileHandle:DWORD
+	local imageSize:DWORD
+	local imageBuf[BUF_SIZE]:BYTE
+
+	BZero requestBuf
+	BZero responseBuf
+	BZero fileNameBuf
+
 	mov fileNameStruct.lStructSize,sizeof fileNameStruct
 	push hWnd 
     pop  fileNameStruct.hwndOwner 
@@ -285,15 +688,65 @@ sendImage PROC hWnd:DWORD
 	.IF eax == TRUE
 		INVOKE MessageBox, hWnd, ADDR fileNameBuf,
 			ADDR WindowName, MB_OK
+
+		invoke CreateFile,addr fileNameBuf,GENERIC_READ,0,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,0
+		mov fileHandle,eax
+
+		invoke GetFileSize,fileHandle,addr imageSize
+
+		invoke sprintf,addr requestBuf,addr sendImageRequestFormat,receiverId,imageSize
+
+		.WHILE TRUE
+			BZero imageBuf
+			invoke ReadFile,fileHandle,addr imageBuf,BUF_SIZE-1,addr bytesRead,NULL
+
+			.if eax==0
+				invoke GetLastError
+				invoke printf,addr debugNumFormat,eax
+			.endif
+
+			invoke send,client.clientSocket,addr imageBuf,bytesRead,0
+
+			mov eax,bytesRead
+			.if eax < BUF_SIZE -1
+				.BREAK
+			.endif
+		.ENDW
+
+		invoke addSendImage,addr fileNameBuf,currentMessageHeight
+		mov eax,currentMessageHeight
+		add eax,MESSAGE_HEIGHT
+		mov currentMessageHeight,eax
 		INVOKE InvalidateRect,hWnd, NULL, TRUE
 	.ENDIF
 	ret 
 sendImage ENDP
 
+sendText PROC hWnd:DWORD
+	local requestBuf[BUF_SIZE]:BYTE
+	local responseBuf[BUF_SIZE]:BYTE
+	local message[BUF_SIZE]:BYTE
+
+	invoke GetWindowText,hChatInput,addr message,BUF_SIZE
+	BZero requestBuf
+	BZero responseBuf
+	invoke sprintf,addr requestBuf,addr sendTextRequestFormat,receiverId,addr message
+
+	invoke lstrlen,addr message
+	mov ebx,eax
+	invoke send,client.clientSocket,addr message,ebx,0
+
+	invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
+
+	ret
+sendText ENDP
+
 handleLogin PROC hWnd:DWORD
 	local loginRequestBuf[BUF_SIZE]:BYTE
+	local responseBuf[BUF_SIZE]:BYTE
 
 	BZero loginRequestBuf
+	BZero responseBuf
 
 	INVOKE GetWindowText,hUsernameInput,addr usernameBuf,BUF_SIZE
 	INVOKE GetWindowText,hPasswordInput,addr passwordBuf,BUF_SIZE
@@ -309,10 +762,15 @@ handleLogin PROC hWnd:DWORD
 	invoke lstrlen,addr loginRequestBuf
 	invoke send,client.clientSocket,addr loginRequestBuf,eax,0
 
+	invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE -1,0
+
+	invoke lstrcmp,addr responseBuf,addr successResponse
+
+	.if eax==0
+		invoke MessageBox,hWnd,addr loginSuccessInfo,addr WindowName,MB_OK
+	.endif
 
 	mov SCENE,1
-
-
 
 	; 初始化好友列表
 	INVOKE initFriendsList,hWnd
@@ -342,11 +800,14 @@ initClient PROC
 	invoke inet_addr,addr localIP
 	mov @sock_addr.sin_addr,eax
 	invoke connect,client.clientSocket,addr @sock_addr,sizeof @sock_addr
+
+	ret
 initClient ENDP
 
 WinMain PROC
-	;invoke initClient
+	invoke initClient
 ; Get a handle to the current process.
+
 	INVOKE GetModuleHandle, NULL
 
 	mov hInstance, eax
@@ -402,7 +863,93 @@ Exit_Program:
 	  INVOKE ExitProcess,0
 WinMain ENDP
 
+getLastMessages PROC
+	local getLastMessagesRequestBuf[BUF_SIZE]:BYTE
+	local responseBuf[BUF_SIZE]:BYTE
+	local commandType[BUF_SIZE]:BYTE
+	local row:DWORD
+	local messageAddr:DWORD
+	local imageSize:DWORD
+	local imageBuf[BUF_SIZE]:BYTE
+	local imageName[BUF_SIZE]:BYTE
+	local fileHandle:DWORD
+	local hasReceivedSize:DWORD
 
+	BZero commandType
+	mov row,0
+	mov receiverId,friendId
+
+	BZero getLastMessagesRequestBuf
+	invoke sprintf,addr getLastMessagesRequestBuf,addr getLastMessagesRequestFormat,friendId
+
+	invoke lstrlen,addr getLastMessagesRequestBuf
+	mov ecx,eax
+
+	invoke send,client.clientSocket,addr getLastMessagesRequestBuf,ecx,0
+
+	BZero responseBuf
+	invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
+
+	invoke sscanf,addr responseBuf,addr messagesNumResponseFormat,addr commandType,addr row
+
+	mov ecx,1
+	.while ecx <= row
+		BZero responseBuf
+
+		invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
+
+		BZero commandTyoe
+		invoke sscanf,addr responseBuf,addr toStrFormat,addr commandType
+
+		invoke lstrcmp,addr commandType,addr SEND_TEXT_COMMAND
+
+		.if eax==0
+				invoke HeapAlloc,hHeap,HEAP_ZERO_MEMORY,BUF_SIZE
+				mov message,eax
+
+				invoke sscanf,addr responseBuf,addr textResponseFormat,message
+
+				INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
+					WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
+				
+
+		.else
+			BZero imageName
+			invoke generateRandomImageName,addr imageName
+			invoke sscanf,addr responseBuf,addr imageResponseFormat,addr imageSize
+
+			;create image file
+			invoke CreateFile,addr imageName,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL OR FILE_FLAG_WRITE_THROUGH,0
+			mov fileHandle,eax
+
+			; start recv image content
+			mov hasReceivedSize,0
+			mov eax,imageSize
+
+			.WHILE hasReceivedSize < eax
+				push eax
+				invoke recv,client.clientSocket,addr imageBuf,BUF_SIZE - 1,0
+				add hasReceivedSize,eax
+				mov ebx,eax
+				invoke WriteFile,fileHandle,addr imageBuf,ebx,addr bytesWrite,NULL
+				pop eax
+			.endw
+			invoke CloseHandle,fileHandle
+
+			invoke addRecvImage,addr imageName,currentMessageHeight
+			mov eax,currentMessageHeight
+			add eax,MESSAGE_HEIGHT
+			mov currentMessageHeight,eax
+
+		.endif
+
+	.endw
+
+
+	INVOKE UpdateWindow, hMainWnd
+
+	ret
+getLastMessages ENDP
 
 ;-----------------------------------------------------
 WinProc PROC,
@@ -455,17 +1002,16 @@ WinProc PROC,
 			
 		.ELSEIF bx == SEND_IMAGE_BUTTON_ID
 			INVOKE sendImage,hWnd
+
+		.elseif bx == SEND_BUTTON_ID
+			invoke sendText,hWnd
 		.ENDIF
 		jmp WinProcExit
 	.ELSEIF eax == WM_PAINT
 		.IF SCENE == 1
 			push eax
-			INVOKE lstrlen,addr fileNameBuf
-			.IF eax != 0
-				INVOKE showImage,hWnd
-			.ELSE
-				INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
-			.ENDIF
+			INVOKE showImage,hWnd
+				;INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
 			pop eax
 		.ELSE
 			INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
@@ -477,7 +1023,20 @@ WinProc PROC,
 			mov ecx,lParam
 			mov edx,(NMITEMACTIVATE ptr [ecx]).hdr.code
 			.IF edx == NM_DBLCLK
+				
 				mov edx,(NMITEMACTIVATE ptr [ecx]).iItem
+				push edx
+				.if edx != receiverId
+					.if receiverId !=-1
+						invoke KillTimer,NULL,TIMER_ID
+					.else
+						invoke SetTimer,hWnd,TIMER_ID,2000,NULL
+					.endif
+				.endif
+				pop edx
+				.if edx == receiverId
+					jmp WinProcExit
+				.endif
 				INVOKE initChatWindow,hWnd,edx
 				INVOKE initChatInput,hWnd
 				INVOKE initChatSendButton,hWnd
@@ -491,6 +1050,13 @@ WinProc PROC,
 			jmp WinProcExit
 		.ENDIF
 		jmp WinProcExit
+	.ELSEIF eax == WM_TIMER
+		push eax
+		mov eax,wParam
+		.if eax == TIMER_ID
+			invoke getLastMessages,hWnd
+		.endif
+		pop eax
 	.ELSE		; other message?
 	  INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
 	  jmp WinProcExit
