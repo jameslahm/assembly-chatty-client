@@ -38,7 +38,7 @@ time	        PROTO C :ptr dword
 
 
 ; 常量定义
-WINDOW_WIDTH = 1020
+WINDOW_WIDTH = 1320
 WINDOW_HEIGHT = 740
 CLIENT_WIDTH = 1000
 CLIENT_HEIGHT = 700
@@ -114,6 +114,7 @@ FRIENDS_LIST_ID = 1001
 SEND_BUTTON_ID = 1002
 SEND_IMAGE_BUTTON_ID = 1003
 TIMER_ID = 1004
+USERS_LIST_ID = 1005
 
 ;==================== DATA =======================
 .data
@@ -188,8 +189,11 @@ hLoginButton DWORD ?
 
 ; 好友列表
 friendsListText BYTE "Friends",0
-hFriendsList DWORD ?
+usersListText BYTE "Users",0
+hFriendsList DWORD -1
+hUsersList DWORD ?
 friends User 50 DUP(<>)
+users User 50 DUP(<>)
 
 ; 聊天窗口
 message1 BYTE "Hello",0
@@ -223,6 +227,8 @@ getMessagesRequestFormat BYTE "MESSAGES %d",0dh,0ah,0
 getLastMessagesRequestFormat BYTE "LASTMESSAGES %d",0dh,0ah,0
 sendTextRequestFormat BYTE "TEXT %d %s",0dh,0ah,0
 sendImageRequestFormat BYTE "IMAGE %d %d",0dh,0ah,0
+getUsersRequestFormat BYTE "USERS",0dh,0ah,0
+addFriendRequestFormat BYTE "ADDFRIEND %d",0dh,0ah,0
 
 ; 响应
 successResponse BYTE "SUCCESS",0dh,0ah,0
@@ -254,7 +260,7 @@ filterString BYTE "Images",0,"*.bmp;*.png",0
 fileNameBuf BYTE BUF_SIZE DUP(0)
 hBitmap DWORD ?
 
-FAKE_FILENAME BYTE "E:\c++\assemble\assembly-chatty-client\blpzkzeouy.png",0
+FAKE_FILENAME BYTE "blpzkzeouy.png",0
 
 Image struct 
 	imageName BYTE BUF_SIZE DUP(0)
@@ -299,6 +305,32 @@ generateRandomImageName PROC buf:ptr BYTE
 	ret
 generateRandomImageName ENDP
 
+addFriend PROC hWnd:DWORD,userId:DWORD
+	local friendId:DWORD
+	local requestBuf[BUF_SIZE]:BYTE
+	local responseBuf[BUF_SIZE]:BYTE
+
+	BZero requestBuf
+
+	mov edx,0
+	mov eax,offset users
+	.while edx< userId
+		add eax,sizeof User
+		inc edx
+	.endw
+
+	assume eax: ptr User
+	push [eax].id
+	pop friendId
+
+	invoke sprintf,addr requestBuf,addr addFriendRequestFormat,friendId
+	invoke lstrlen,addr requestBuf
+	mov ebx,eax
+	invoke send,client.clientSocket,addr requestBuf,ebx,0
+
+	invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE,0
+	ret
+addFriend ENDP
 
 initFriend PROC friendIdAddr:PTR DWORD,friendNameAddr:ptr byte
 	mov eax,offset friends
@@ -320,6 +352,116 @@ initFriend PROC friendIdAddr:PTR DWORD,friendNameAddr:ptr byte
 	ret
 initFriend ENDP
 
+initUser PROC userIdAddr:PTR DWORD,userNameAddr:ptr byte
+	mov eax,offset users
+	assume eax:ptr User
+	.WHILE TRUE
+		.if [eax].id == -1
+			mov ebx,userIdAddr
+			push [ebx]
+			pop [eax].id
+
+			invoke lstrcpy,addr [eax].username,userNameAddr
+
+			assume eax:nothing
+			.BREAK
+		.else
+			add eax,sizeof User
+		.endif
+	.ENDW
+	ret
+initUser ENDP
+
+initUsersList PROC hWnd:DWORD
+	LOCAL lvc:LV_COLUMN
+	LOCAL lvi:LV_ITEM
+	local responseBuf[BUF_SIZE]:BYTE
+	local usersNum:DWORD
+	local userId:DWORD
+	local userName[BUF_SIZE]:DWORD
+
+	BZero responseBuf
+
+	invoke CreateWindowEx, NULL, addr ListClassName, NULL, LVS_REPORT+WS_CHILD+WS_VISIBLE, 1000,0,300,CLIENT_HEIGHT,hWnd, USERS_LIST_ID, hInstance, NULL
+    mov hUsersList, eax
+
+	mov lvc.imask,LVCF_TEXT+LVCF_WIDTH
+	mov lvc.pszText,offset usersListText
+	mov lvc.lx,300
+	invoke SendMessage,hUsersList, LVM_INSERTCOLUMN, 0, addr lvc
+
+	invoke lstrlen,addr getUsersRequestFormat
+
+	invoke send,client.clientSocket,addr getUsersRequestFormat,eax,0
+
+	Recv
+	;invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
+
+	invoke lstrlen,addr responseBuf
+
+	invoke sscanf,addr responseBuf,addr usersNumResponseFormat,addr usersNum
+
+	mov ecx,1
+	.while ecx <= usersNum
+		push ecx
+		BZero responseBuf
+		BZero userName
+
+		Recv
+		;invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
+
+		;Debug responseBuf
+
+		invoke sscanf,addr responseBuf,addr usersResponseFormat,addr userId,addr userName
+
+		invoke initUser,addr userId,addr userName
+		pop ecx
+		inc ecx
+	.endw
+
+	mov eax,offset users
+	assume eax:ptr User
+	.while TRUE
+		.if [eax].id != -1
+			mov lvi.imask,LVIF_TEXT+LVIF_PARAM
+			mov ecx,[eax].id
+			
+			mov lvi.iItem,ecx
+			mov lvi.iSubItem,0
+			lea ebx,[eax].username
+			mov lvi.pszText,ebx
+			push eax
+			invoke SendMessage,hUsersList, LVM_INSERTITEM,0, addr lvi
+			pop eax
+			add eax,sizeof User
+		.else
+			.break
+		.endif
+	.endw
+
+	INVOKE InvalidateRect,hWnd, NULL, FALSE
+
+	ret
+initUsersList ENDP
+
+clearFriends PROC
+	mov eax,offset friends
+	assume eax:ptr User
+	.WHILE TRUE
+		.if [eax].id != -1
+			push -1
+			pop [eax].id
+
+			push eax
+			BZero [eax].username
+			pop eax
+			add eax,sizeof User
+		.else
+			.BREAK
+		.endif
+	.ENDW
+	ret
+clearFriends ENDP
 
 ; 初始化好友列表
 initFriendsList PROC hWnd:DWORD
@@ -331,6 +473,11 @@ initFriendsList PROC hWnd:DWORD
 	local friendName[BUF_SIZE]:DWORD
 
 	BZero responseBuf
+
+	.if hFriendsList != -1
+		invoke DestroyWindow,hFriendsList
+		invoke clearFriends
+	.endif
 
 	invoke CreateWindowEx, NULL, addr ListClassName, NULL, LVS_REPORT+WS_CHILD+WS_VISIBLE, 0,0,300,CLIENT_HEIGHT,hWnd, FRIENDS_LIST_ID, hInstance, NULL
     mov hFriendsList, eax
@@ -374,7 +521,9 @@ initFriendsList PROC hWnd:DWORD
 	.while TRUE
 		.if [eax].id != -1
 			mov lvi.imask,LVIF_TEXT+LVIF_PARAM
-			mov lvi.iItem,0
+			mov ecx,[eax].id
+	
+			mov lvi.iItem,ecx
 			mov lvi.iSubItem,0
 			lea ebx,[eax].username
 			mov lvi.pszText,ebx
@@ -776,7 +925,6 @@ sendImage PROC hWnd:DWORD
 			.endif
 		.ENDW
 
-		invoke MessageBox,hWnd,addr fileNameBuf,addr WindowName,MB_OK
 		invoke addSendImage,addr fileNameBuf,currentMessageHeight
 
 		mov eax,currentMessageHeight
@@ -853,6 +1001,7 @@ handleLogin PROC hWnd:DWORD
 
 	; 初始化好友列表
 	INVOKE initFriendsList,hWnd
+	invoke initUsersList,hWnd
 	ret
 handleLogin ENDP
 
@@ -1133,6 +1282,17 @@ WinProc PROC,
 				INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
 				jmp WinProcExit
 			.ENDIF
+		.elseif ebx == USERS_LIST_ID
+			mov ecx,lParam
+			mov edx,(NMITEMACTIVATE ptr [ecx]).hdr.code
+			.IF edx == NM_DBLCLK
+				mov edx,(NMITEMACTIVATE ptr [ecx]).iItem
+				invoke addFriend,hWnd,edx
+				invoke initFriendsList,hWnd
+			.ELSE
+				INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
+				jmp WinProcExit
+			.ENDIF
 		.ELSE
 			INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
 			jmp WinProcExit
@@ -1143,7 +1303,7 @@ WinProc PROC,
 		.if eax == TIMER_ID
 			;INVOKE MessageBox, hWnd, ADDR CloseMsg,
 			;ADDR WindowName, MB_OK
-			;invoke getLastMessages,hWnd
+			invoke getLastMessages,hWnd
 		.endif
 	.ELSE		; other message?
 	  INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
