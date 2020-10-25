@@ -38,7 +38,7 @@ time	        PROTO C :ptr dword
 
 
 ; 常量定义
-WINDOW_WIDTH = 1320
+WINDOW_WIDTH = 1020
 WINDOW_HEIGHT = 740
 CLIENT_WIDTH = 1000
 CLIENT_HEIGHT = 700
@@ -52,6 +52,7 @@ IMAGE_WIDTH = 100
 IMAGE_HEIGHT = 100
 
 BUF_SIZE = 512
+SCROLL_BAR_WIDTH = 20
 
 User STRUCT
 	id DWORD -1
@@ -149,6 +150,7 @@ CloseMsg   BYTE "WM_CLOSE message received",0
 ErrorTitle  BYTE "Error",0
 WindowName  BYTE "ASM Windows App",0
 className   BYTE "ASMWin",0
+chatClassName BYTE "CHATWIN",0
 
 localIP BYTE "127.0.0.1",0
 
@@ -156,9 +158,12 @@ localIP BYTE "127.0.0.1",0
 MainWin WNDCLASS <NULL,WinProc,NULL,NULL,NULL,NULL,NULL, \
 	COLOR_WINDOW,NULL,className>
 
+ChatMainWin WNDCLASS <NULL,ChatWinProc,NULL,NULL,NULL,NULL,NULL,COLOR_WINDOW,NULL,chatClassName>
+
 msg	      MSG <>
 winRect   RECT <>
 hMainWnd  DWORD ?
+hChatMainWnd DWORD -1
 hInstance DWORD ?
 
 
@@ -267,13 +272,26 @@ Image struct
 	height    DWORD -1
 Image ends
 
+Text struct
+	content BYTE BUF_SIZE DUP(0)
+	height DWORD -1
+Text ends
+
 sendImages Image 20 DUP(<>)
 recvImages Image 20 DUP(<>)
+sendTexts Text 50 DUP(<>)
+recvTexts Text 50 DUP(<>)
 
 currentMessageHeight DWORD 0
 
 ; 当前接收者
 receiverId DWORD -1
+
+; 当前滚动高度
+scrollPosition DWORD 0
+
+; 聊天框界面
+hChatWindow DWORD ?
 
 
 ;=================== CODE =========================
@@ -382,7 +400,7 @@ initUsersList PROC hWnd:DWORD
 
 	BZero responseBuf
 
-	invoke CreateWindowEx, NULL, addr ListClassName, NULL, LVS_REPORT+WS_CHILD+WS_VISIBLE, 1000,0,300,CLIENT_HEIGHT,hWnd, USERS_LIST_ID, hInstance, NULL
+	invoke CreateWindowEx, NULL, addr ListClassName, NULL, LVS_REPORT+WS_CHILD+WS_VISIBLE+WS_VSCROLL,0,CLIENT_HEIGHT/2,300,CLIENT_HEIGHT/2,hWnd, USERS_LIST_ID, hInstance, NULL
     mov hUsersList, eax
 
 	mov lvc.imask,LVCF_TEXT+LVCF_WIDTH
@@ -439,6 +457,7 @@ initUsersList PROC hWnd:DWORD
 		.endif
 	.endw
 
+	INVOKE InvalidateRect,hChatMainWnd, NULL, FALSE
 	INVOKE InvalidateRect,hWnd, NULL, FALSE
 
 	ret
@@ -479,7 +498,7 @@ initFriendsList PROC hWnd:DWORD
 		invoke clearFriends
 	.endif
 
-	invoke CreateWindowEx, NULL, addr ListClassName, NULL, LVS_REPORT+WS_CHILD+WS_VISIBLE, 0,0,300,CLIENT_HEIGHT,hWnd, FRIENDS_LIST_ID, hInstance, NULL
+	invoke CreateWindowEx, NULL, addr ListClassName, NULL, LVS_REPORT+WS_CHILD+WS_VISIBLE+WS_VSCROLL, 0,0,300,CLIENT_HEIGHT/2,hWnd, FRIENDS_LIST_ID, hInstance, NULL
     mov hFriendsList, eax
 
 	mov lvc.imask,LVCF_TEXT+LVCF_WIDTH
@@ -536,10 +555,57 @@ initFriendsList PROC hWnd:DWORD
 		.endif
 	.endw
 
+	INVOKE InvalidateRect,hChatMainWnd, NULL, FALSE
 	INVOKE InvalidateRect,hWnd, NULL, FALSE
 
 	ret
 initFriendsList ENDP
+
+addSendText PROC bufAddr:DWORD,height:DWORD
+	mov eax,offset sendTexts
+	.WHILE TRUE
+		assume eax:ptr Text
+		push eax
+		invoke lstrlen,addr [eax].content
+		mov ebx,eax
+		pop eax
+		.if ebx==0
+			push eax
+			invoke lstrcpy,addr [eax].content,bufAddr
+			pop eax
+			
+			push height
+			pop [eax].height
+			.BREAK
+		.else
+			add eax,sizeof Text
+		.endif
+	.endw
+	ret
+addSendText ENDP
+
+addRecvText PROC bufAddr:DWORD,height:DWORD
+	mov eax,offset recvTexts
+	.WHILE TRUE
+		assume eax:ptr Text
+		push eax
+		invoke lstrlen,addr [eax].content
+		mov ebx,eax
+		pop eax
+		.if ebx==0
+			push eax
+			invoke lstrcpy,addr [eax].content,bufAddr
+			pop eax
+			
+			push height
+			pop [eax].height
+			.BREAK
+		.else
+			add eax,sizeof Text
+		.endif
+	.endw
+	ret
+addRecvText ENDP
 
 addSendImage PROC bufAddr:DWORD,height:DWORD
 	mov eax,offset sendImages
@@ -602,6 +668,7 @@ initChatWindow PROC hWnd:DWORD,friendId:DWORD
 	local hasReceivedSize:DWORD
 	local message:DWORD
 	local bytesWrite:DWORD
+	local content[BUF_SIZE]:BYTE
 
 	BZero commandType
 	mov row,0
@@ -650,13 +717,13 @@ initChatWindow PROC hWnd:DWORD,friendId:DWORD
 		invoke lstrcmp,addr commandType,addr SEND_TEXT_COMMAND
 
 		.if eax==0
-				invoke HeapAlloc,hHeap,HEAP_ZERO_MEMORY,BUF_SIZE
-				mov message,eax
+				BZero content
 
-				invoke sscanf,addr responseBuf,addr textResponseFormat,message
+				invoke sscanf,addr responseBuf,addr textResponseFormat,addr content
 
-				INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
-					WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE OR SS_RIGHT,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
+				invoke addSendText,addr content,currentMessageHeight
+				;INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
+					;WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE OR SS_RIGHT,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
 				
 				mov eax,currentMessageHeight
 				add eax,MESSAGE_HEIGHT
@@ -721,13 +788,14 @@ initChatWindow PROC hWnd:DWORD,friendId:DWORD
 		invoke lstrcmp,addr commandType,addr SEND_TEXT_COMMAND
 
 		.if eax==0
-				invoke HeapAlloc,hHeap,HEAP_ZERO_MEMORY,BUF_SIZE
-				mov message,eax
+				BZero content
 
-				invoke sscanf,addr responseBuf,addr textResponseFormat,message
+				invoke sscanf,addr responseBuf,addr textResponseFormat,addr content
 
-				INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
-					WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
+				invoke addRecvText,addr content,currentMessageHeight
+
+				;INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
+					;WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
 				
 				mov eax,currentMessageHeight
 				add eax,MESSAGE_HEIGHT
@@ -797,16 +865,73 @@ initChatSendImageButton PROC hWnd:DWORD
 
 initChatSendImageButton ENDP
 
-showImage PROC hWnd:DWORD
+showMessages PROC hWnd:DWORD
 	LOCAL ps:PAINTSTRUCT
 	LOCAL hdc:HDC
-	LOCAL hMemDC:HDC
 	LOCAL rect:RECT;
-	local fileNameAddr:DWORD
+	local contentAddr:DWORD
 	local height:DWORD
+	LOCAL hMemDC:HDC
+	local fileNameAddr:DWORD
 
 	invoke BeginPaint,hWnd,addr ps
 	mov    hdc,eax
+
+	mov eax,offset sendTexts
+	.while TRUE
+		push eax
+		assume eax: ptr Text
+		lea ecx,[eax].content
+		mov contentAddr,ecx
+		push [eax].height
+		pop height
+
+		invoke lstrlen,contentAddr
+		.if eax==0
+			.break
+		.endif
+
+		mov eax,height
+		sub eax,scrollPosition
+		mov height,eax
+		
+		invoke SetTextAlign,hdc,TA_RIGHT
+		invoke lstrlen,contentAddr
+		mov ebx,eax
+		invoke TextOut,hdc,CLIENT_WIDTH-FRIENDS_LIST_WIDTH-SCROLL_BAR_WIDTH,height,contentAddr,ebx
+
+		pop eax
+		add eax,sizeof Text
+	.endw
+
+	mov eax,offset recvTexts
+	.while TRUE
+		push eax
+		assume eax: ptr Text
+		lea ecx,[eax].content
+		mov contentAddr,ecx
+		push [eax].height
+		pop height
+
+		invoke lstrlen,contentAddr
+		.if eax==0
+			.break
+		.endif
+
+		mov eax,height
+		sub eax,scrollPosition
+		mov height,eax
+		
+		invoke SetTextAlign,hdc,TA_LEFT
+		invoke lstrlen,contentAddr
+		mov ebx,eax
+		invoke TextOut,hdc,0,height,contentAddr,ebx
+
+		pop eax
+		add eax,sizeof Text
+	.endw
+
+	
 
 	mov eax,offset sendImages
 	.while TRUE
@@ -833,7 +958,7 @@ showImage PROC hWnd:DWORD
 		mov    hMemDC,eax
 		invoke SelectObject,hMemDC,hBitmap
 		invoke GetClientRect,hWnd,addr rect
-		invoke BitBlt,hdc,900,height,rect.right,rect.bottom,hMemDC,0,0,SRCCOPY
+		invoke BitBlt,hdc,600-SCROLL_BAR_WIDTH,height,rect.right,rect.bottom,hMemDC,0,0,SRCCOPY
 		invoke DeleteDC,hMemDC
 		invoke DeleteObject,hBitmap
 
@@ -861,7 +986,7 @@ showImage PROC hWnd:DWORD
 		mov    hMemDC,eax
 		invoke SelectObject,hMemDC,hBitmap
 		invoke GetClientRect,hWnd,addr rect
-		invoke BitBlt,hdc,300,height,rect.right,rect.bottom,hMemDC,0,0,SRCCOPY
+		invoke BitBlt,hdc,0,height,rect.right,rect.bottom,hMemDC,0,0,SRCCOPY
 		invoke DeleteDC,hMemDC
 		invoke DeleteObject,hBitmap
 
@@ -872,7 +997,7 @@ showImage PROC hWnd:DWORD
 	invoke EndPaint,hWnd,addr ps
 
 	ret
-showImage ENDP
+showMessages ENDP
 
 sendImage PROC hWnd:DWORD
 	local requestBuf[BUF_SIZE]:BYTE
@@ -928,11 +1053,12 @@ sendImage PROC hWnd:DWORD
 		invoke addSendImage,addr fileNameBuf,currentMessageHeight
 
 		mov eax,currentMessageHeight
-		add eax,MESSAGE_HEIGHT
+		add eax,IMAGE_HEIGHT
 		mov currentMessageHeight,eax
 
 		invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
 	.ENDIF
+	INVOKE InvalidateRect,hChatMainWnd, NULL, FALSE
 	INVOKE InvalidateRect,hWnd, NULL, FALSE
 	ret 
 sendImage ENDP
@@ -957,12 +1083,14 @@ sendText PROC hWnd:DWORD
 	Recv
 	;invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
 
-	INVOKE CreateWindowEx,NULL,addr StaticClassName,addr message,
-					WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE OR SS_RIGHT,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
+	;INVOKE CreateWindowEx,NULL,addr StaticClassName,addr message,
+					;WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE OR SS_RIGHT,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
+	invoke addSendText,addr message,currentMessageHeight
 	mov eax,currentMessageHeight
 	add eax,MESSAGE_HEIGHT
 	mov currentMessageHeight,eax
 
+	INVOKE InvalidateRect,hChatMainWnd, NULL, FALSE
 	INVOKE InvalidateRect,hWnd, NULL, FALSE
 	ret
 sendText ENDP
@@ -1002,6 +1130,15 @@ handleLogin PROC hWnd:DWORD
 	; 初始化好友列表
 	INVOKE initFriendsList,hWnd
 	invoke initUsersList,hWnd
+
+	INVOKE CreateWindowEx, 0, ADDR chatClassName,
+				  ADDR WindowName,WS_CHILD + WS_VISIBLE  + WS_VSCROLL,
+				 FRIENDS_LIST_WIDTH,0,CLIENT_WIDTH - FRIENDS_LIST_WIDTH,
+				  CLIENT_HEIGHT-CHAT_INPUT_HEIGHT,hWnd,NULL,hInstance,NULL
+	mov hChatMainWnd,eax
+
+	INVOKE InvalidateRect,hWnd, NULL, FALSE
+
 	ret
 handleLogin ENDP
 
@@ -1051,6 +1188,7 @@ WinMain PROC
 
 ; Register the window class.
 	INVOKE RegisterClass, ADDR MainWin
+	INVOKE RegisterClass,addr ChatMainWin
 	.IF eax == 0
 	  call ErrorHandler
 	  jmp Exit_Program
@@ -1106,6 +1244,7 @@ getLastMessages PROC hWnd:DWORD
 	local hasReceivedSize:DWORD
 	local message:DWORD
 	local bytesWrite:DWORD
+	local content[BUF_SIZE]:BYTE
 
 	BZero commandType
 	mov row,0
@@ -1138,13 +1277,14 @@ getLastMessages PROC hWnd:DWORD
 		invoke lstrcmp,addr commandType,addr SEND_TEXT_COMMAND
 
 		.if eax==0
-				invoke HeapAlloc,hHeap,HEAP_ZERO_MEMORY,BUF_SIZE
-				mov message,eax
+				BZero content
 
-				invoke sscanf,addr responseBuf,addr textResponseFormat,message
+				invoke sscanf,addr responseBuf,addr textResponseFormat,addr content
 
-				INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
-					WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
+				invoke addRecvText,addr content,currentMessageHeight
+
+				;INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
+					;WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
 				
 				mov eax,currentMessageHeight
 				add eax,MESSAGE_HEIGHT
@@ -1189,9 +1329,12 @@ getLastMessages PROC hWnd:DWORD
 		inc ecx
 	.endw
 
-
+	mov ebx,currentMessageHeight
+	mov ecx,CLIENT_HEIGHT
+	sub ebx,ecx
+	invoke SetScrollRange,hChatMainWnd, SB_VERT, 0,ebx , TRUE;
+	INVOKE InvalidateRect,hChatMainWnd, NULL, FALSE
 	INVOKE InvalidateRect,hWnd, NULL, FALSE
-
 	ret
 getLastMessages ENDP
 
@@ -1208,6 +1351,12 @@ WinProc PROC,
 	.IF eax == WM_LBUTTONDOWN		; mouse button
 	  jmp WinProcExit
 	.ELSEIF eax == WM_CREATE		; create window
+
+	  mov ebx,currentMessageHeight
+	  mov ecx,CLIENT_HEIGHT
+	  sub ebx,ecx
+	  invoke SetScrollRange,hChatMainWnd, SB_VERT, 0,0 , TRUE;
+
 	  ; 创建用户名标签
 	  INVOKE CreateWindowEx,NULL,addr StaticClassName,addr UsernameLabelText,
 	  WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE OR SS_RIGHT,10,100,200,40,hWnd,NULL,hInstance,NULL
@@ -1253,8 +1402,9 @@ WinProc PROC,
 		;jmp WinProcExit
 	.ELSEIF eax == WM_PAINT
 		.IF SCENE == 1
-			INVOKE showImage,hWnd
+			;invoke showMessages,hWnd
 				;INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
+			INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
 		.ELSE
 			;INVOKE showImage,hWnd
 			INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
@@ -1272,11 +1422,16 @@ WinProc PROC,
 				.if receiverId == -1
 					invoke SetTimer,hWnd,TIMER_ID,3000,NULL
 				.endif
-				
+
 				INVOKE initChatWindow,hWnd,edx
 				INVOKE initChatInput,hWnd
 				INVOKE initChatSendButton,hWnd
 				INVOKE initChatSendImageButton,hWnd
+				mov ebx,currentMessageHeight
+				mov ecx,CLIENT_HEIGHT
+				sub ebx,ecx
+				invoke SetScrollRange,hChatMainWnd, SB_VERT, 0,ebx , TRUE;
+				INVOKE InvalidateRect,hChatMainWnd, NULL, FALSE
 				INVOKE InvalidateRect,hWnd, NULL, FALSE
 			.ELSE
 				INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
@@ -1314,6 +1469,69 @@ WinProcExit:
 	ret
 WinProc ENDP
 
+ChatWinProc PROC,
+	hWnd:DWORD, localMsg:DWORD, wParam:DWORD, lParam:DWORD
+; The application's message handler, which handles
+; application-specific messages. All other messages
+; are forwarded to the default Windows message
+; handler.
+;-----------------------------------------------------
+	mov eax, localMsg
+
+	.IF eax == WM_LBUTTONDOWN		; mouse button
+	  jmp ChatWinProcExit
+	.ELSEIF eax == WM_CREATE		; create window
+	.ELSEIF eax == WM_PAINT
+		.IF SCENE == 1
+			invoke showMessages,hWnd
+				;INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
+		.ELSE
+			;INVOKE showImage,hWnd
+			INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
+		.ENDIF
+		jmp ChatWinProcExit
+	.elseif eax == WM_VSCROLL
+		mov ebx,wParam
+		push scrollPosition
+		.if bx  == SB_LINEUP
+			sub scrollPosition,10
+		.elseif bx == SB_LINEDOWN
+			add scrollPosition,10
+		.elseif bx == SB_PAGEUP
+			sub scrollPosition,100
+		.elseif bx == SB_PAGEDOWN
+			add scrollPosition,100
+		.elseif bx==SB_THUMBTRACK
+			shr ebx,16
+			mov scrollPosition,ebx
+		.else
+			;INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
+		.endif
+
+		invoke GetScrollPos,hChatMainWnd,SB_VERT
+		.if eax!= scrollPosition
+			invoke SetScrollPos,hChatMainWnd, SB_VERT, scrollPosition , TRUE
+		.endif
+
+		pop ecx
+		mov edx,scrollPosition
+		sub ecx,edx
+
+		invoke ScrollWindow,hChatMainWnd, 0, ecx, NULL, NULL;
+		invoke UpdateWindow,hChatMainWnd
+
+		;invoke InvalidateRect,hWnd,NULL,FALSE
+		
+		jmp ChatWinProcExit
+	.ELSE		; other message?
+	  INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
+	  jmp ChatWinProcExit
+	.ENDIF
+
+ChatWinProcExit:
+	ret
+ChatWinProc ENDP
+
 ;---------------------------------------------------
 ErrorHandler PROC
 ; Display the appropriate system error message.
@@ -1338,5 +1556,6 @@ messageID  DWORD ?
 	INVOKE LocalFree, pErrorMsg
 	ret
 ErrorHandler ENDP
+
 
 END WinMain
