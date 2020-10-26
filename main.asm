@@ -116,6 +116,7 @@ SEND_BUTTON_ID = 1002
 SEND_IMAGE_BUTTON_ID = 1003
 TIMER_ID = 1004
 USERS_LIST_ID = 1005
+REGISTER_BUTTON_ID = 1006
 
 ;==================== DATA =======================
 .data
@@ -123,6 +124,9 @@ USERS_LIST_ID = 1005
 client Client<>
 hHeap DWORD ?
 base DWORD 0
+debounceControl DWORD 0
+addFriendIcon BYTE " + ",0
+addFriendText BYTE "Add",0
 
 ; WSAData init
 wsaData WSADATA <>
@@ -188,6 +192,10 @@ usernameBuf BYTE BUF_SIZE DUP(0)
 hPasswordInput DWORD ?
 passwordBuf BYTE BUF_SIZE DUP(0)
 
+; 注册按钮
+RegisterButtonText BYTE "Register",0
+hRegisterButton DWORD ?
+
 ;登录按钮
 LoginButtonText BYTE "Login",0
 hLoginButton DWORD ?
@@ -227,6 +235,7 @@ GET_LASTMESSAGES_COMMAND BYTE "LASTMESSAGES",0
 
 ; 请求
 loginRequestFormat BYTE "LOGIN %s %s",0dh,0ah,0
+registerRequestFormat BYTE "REGISTER %s %s",0dh,0ah,0
 getFriendsRequestFormat BYTE "FRIENDS",0dh,0ah,0
 getMessagesRequestFormat BYTE "MESSAGES %d",0dh,0ah,0
 getLastMessagesRequestFormat BYTE "LASTMESSAGES %d",0dh,0ah,0
@@ -246,11 +255,12 @@ usersNumResponseFormat BYTE "USERS %d",0dh,0ah,0
 usersResponseFormat BYTE "%d %s",0dh,0ah,0
 
 messagesNumResponseFormat BYTE "MESSAGES %d",0dh,0ah,0
-textResponseFormat BYTE "TEXT %s",0dh,0ah,0
-imageResponseFormat BYTE "IMAGE %d",0dh,0ah,0
+textResponseFormat BYTE "TEXT %d %s",0dh,0ah,0
+imageResponseFormat BYTE "IMAGE %d %d",0dh,0ah,0
 
 ; 提示信息
 loginSuccessInfo BYTE "Login Successful",0
+registerSuccessInfo BYTE "Register Successful",0
 
 toNumFormat BYTE "%d",0
 toStrFormat BYTE "%s",0
@@ -397,6 +407,7 @@ initUsersList PROC hWnd:DWORD
 	local usersNum:DWORD
 	local userId:DWORD
 	local userName[BUF_SIZE]:DWORD
+	local count:DWORD
 
 	BZero responseBuf
 
@@ -404,9 +415,14 @@ initUsersList PROC hWnd:DWORD
     mov hUsersList, eax
 
 	mov lvc.imask,LVCF_TEXT+LVCF_WIDTH
-	mov lvc.pszText,offset usersListText
-	mov lvc.lx,300
+	mov lvc.pszText,offset addFriendText
+	mov lvc.lx,50
 	invoke SendMessage,hUsersList, LVM_INSERTCOLUMN, 0, addr lvc
+
+	mov lvc.imask,LVCF_TEXT+LVCF_WIDTH
+	mov lvc.pszText,offset usersListText
+	mov lvc.lx,250
+	invoke SendMessage,hUsersList, LVM_INSERTCOLUMN, 1, addr lvc
 
 	invoke lstrlen,addr getUsersRequestFormat
 
@@ -420,6 +436,7 @@ initUsersList PROC hWnd:DWORD
 	invoke sscanf,addr responseBuf,addr usersNumResponseFormat,addr usersNum
 
 	mov ecx,1
+	
 	.while ecx <= usersNum
 		push ecx
 		BZero responseBuf
@@ -439,18 +456,30 @@ initUsersList PROC hWnd:DWORD
 
 	mov eax,offset users
 	assume eax:ptr User
+	mov count,0
 	.while TRUE
 		.if [eax].id != -1
+
 			mov lvi.imask,LVIF_TEXT+LVIF_PARAM
-			mov ecx,[eax].id
-			
-			mov lvi.iItem,ecx
+			;mov ecx,[eax].id
+			push count
+			pop lvi.iItem
 			mov lvi.iSubItem,0
-			lea ebx,[eax].username
+			lea ebx,addFriendIcon
 			mov lvi.pszText,ebx
 			push eax
 			invoke SendMessage,hUsersList, LVM_INSERTITEM,0, addr lvi
 			pop eax
+
+			mov lvi.iSubItem,1
+			lea ebx,[eax].username
+			mov lvi.pszText,ebx
+			push eax
+			invoke SendMessage,hUsersList,LVM_SETITEMTEXT,count, addr lvi
+
+			inc count
+			pop eax
+
 			add eax,sizeof User
 		.else
 			.break
@@ -669,6 +698,7 @@ initChatWindow PROC hWnd:DWORD,friendId:DWORD
 	local message:DWORD
 	local bytesWrite:DWORD
 	local content[BUF_SIZE]:BYTE
+	local isRecv:DWORD
 
 	BZero commandType
 	mov row,0
@@ -719,11 +749,13 @@ initChatWindow PROC hWnd:DWORD,friendId:DWORD
 		.if eax==0
 				BZero content
 
-				invoke sscanf,addr responseBuf,addr textResponseFormat,addr content
+				invoke sscanf,addr responseBuf,addr textResponseFormat,addr isRecv,addr content
 
-				invoke addSendText,addr content,currentMessageHeight
-				;INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
-					;WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE OR SS_RIGHT,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
+				.if isRecv == 0
+					invoke addSendText,addr content,currentMessageHeight
+				.else
+					invoke addRecvText,addr content,currentMessageHeight
+				.endif
 				
 				mov eax,currentMessageHeight
 				add eax,MESSAGE_HEIGHT
@@ -731,7 +763,7 @@ initChatWindow PROC hWnd:DWORD,friendId:DWORD
 		.else
 			BZero imageName
 			invoke generateRandomImageName,addr imageName
-			invoke sscanf,addr responseBuf,addr imageResponseFormat,addr imageSize
+			invoke sscanf,addr responseBuf,addr imageResponseFormat,addr isRecv,addr imageSize
 
 			;create image file
 			invoke CreateFile,addr imageName,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL OR FILE_FLAG_WRITE_THROUGH,0
@@ -757,84 +789,15 @@ initChatWindow PROC hWnd:DWORD,friendId:DWORD
 			.endw
 			invoke CloseHandle,fileHandle
 
-			invoke addSendImage,addr imageName,currentMessageHeight
+			.if isRecv == 0
+				invoke addSendImage,addr imageName,currentMessageHeight
+			.else
+				invoke addRecvImage,addr imageName,currentMessageHeight
+			.endif
+
 			mov eax,currentMessageHeight
 			add eax,IMAGE_HEIGHT
 			mov currentMessageHeight,eax
-		.endif
-		pop ecx
-		inc ecx
-	.endw
-
-
-	BZero responseBuf
-
-	Recv
-	;invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
-
-	invoke sscanf,addr responseBuf,addr messagesNumResponseFormat,addr row
-
-	mov ecx,1
-	.while ecx <= row
-		push ecx
-		BZero responseBuf
-
-		Recv
-		;invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
-
-		BZero commandType
-		invoke sscanf,addr responseBuf,addr toStrFormat,addr commandType
-
-		invoke lstrcmp,addr commandType,addr SEND_TEXT_COMMAND
-
-		.if eax==0
-				BZero content
-
-				invoke sscanf,addr responseBuf,addr textResponseFormat,addr content
-
-				invoke addRecvText,addr content,currentMessageHeight
-
-				;INVOKE CreateWindowEx,NULL,addr StaticClassName,message,
-					;WS_VISIBLE OR WS_CHILD OR SS_CENTERIMAGE,FRIENDS_LIST_WIDTH,currentMessageHeight,CLIENT_WIDTH-FRIENDS_LIST_WIDTH,MESSAGE_HEIGHT,hWnd,NULL,hInstance,NULL
-				
-				mov eax,currentMessageHeight
-				add eax,MESSAGE_HEIGHT
-				mov currentMessageHeight,eax
-
-		.else
-			BZero imageName
-			invoke generateRandomImageName,addr imageName
-			invoke sscanf,addr responseBuf,addr imageResponseFormat,addr imageSize
-
-			;create image file
-			invoke CreateFile,addr imageName,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL OR FILE_FLAG_WRITE_THROUGH,0
-			mov fileHandle,eax
-
-			; start recv image content
-			mov hasReceivedSize,0
-			mov eax,imageSize
-
-			.WHILE hasReceivedSize < eax
-				push eax
-				mov ebx,hasReceivedSize
-				mov ecx,eax
-				sub ecx,ebx
-				.if ecx > BUF_SIZE - 1
-					mov ecx,BUF_SIZE -1
-				.endif
-				invoke recv,client.clientSocket,addr imageBuf,ecx,0
-				add hasReceivedSize,eax
-				mov ebx,eax
-				invoke WriteFile,fileHandle,addr imageBuf,ebx,addr bytesWrite,NULL
-				pop eax
-			.endw
-			invoke CloseHandle,fileHandle
-
-			invoke addRecvImage,addr imageName,currentMessageHeight
-			mov eax,currentMessageHeight
-			add eax,IMAGE_HEIGHT
-			mov currentMessageHeight,eax
-
 		.endif
 		pop ecx
 		inc ecx
@@ -890,11 +853,10 @@ showMessages PROC hWnd:DWORD
 		.if eax==0
 			.break
 		.endif
-
+		
 		mov eax,height
 		sub eax,scrollPosition
 		mov height,eax
-		
 		invoke SetTextAlign,hdc,TA_RIGHT
 		invoke lstrlen,contentAddr
 		mov ebx,eax
@@ -947,6 +909,10 @@ showMessages PROC hWnd:DWORD
 			.break
 		.endif
 		
+		mov eax,height
+		sub eax,scrollPosition
+		mov height,eax
+
 		invoke lstrcmp,fileNameAddr,addr FAKE_FILENAME
 
 		invoke LoadImage,NULL,addr FAKE_FILENAME,IMAGE_BITMAP,100,100,LR_LOADFROMFILE
@@ -979,6 +945,10 @@ showMessages PROC hWnd:DWORD
 		.if eax==0
 			.break
 		.endif
+
+		mov eax,height
+		sub eax,scrollPosition
+		mov height,eax
 
 		invoke LoadImage,NULL,fileNameAddr,IMAGE_BITMAP,100,100,LR_LOADFROMFILE
 		mov hBitmap,eax
@@ -1056,8 +1026,17 @@ sendImage PROC hWnd:DWORD
 		add eax,IMAGE_HEIGHT
 		mov currentMessageHeight,eax
 
+		invoke CloseHandle,fileHandle
+
 		invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE-1,0
 	.ENDIF
+
+	mov ebx,currentMessageHeight
+	add ebx,150
+	mov ecx,CLIENT_HEIGHT
+	sub ebx,ecx
+	invoke SetScrollRange,hChatMainWnd, SB_VERT, 0,ebx , TRUE;
+
 	INVOKE InvalidateRect,hChatMainWnd, NULL, FALSE
 	INVOKE InvalidateRect,hWnd, NULL, FALSE
 	ret 
@@ -1090,6 +1069,12 @@ sendText PROC hWnd:DWORD
 	add eax,MESSAGE_HEIGHT
 	mov currentMessageHeight,eax
 
+	mov ebx,currentMessageHeight
+	mov ecx,CLIENT_HEIGHT
+	add ebx,150
+	sub ebx,ecx
+	invoke SetScrollRange,hChatMainWnd, SB_VERT, 0,ebx , TRUE;
+
 	INVOKE InvalidateRect,hChatMainWnd, NULL, FALSE
 	INVOKE InvalidateRect,hWnd, NULL, FALSE
 	ret
@@ -1110,6 +1095,7 @@ handleLogin PROC hWnd:DWORD
 	INVOKE DestroyWindow,hUsernameLabel
 	INVOKE DestroyWindow,hPasswordLabel
 	INVOKE DestroyWindow,hLoginButton
+	INVOKE DestroyWindow,hRegisterButton
 
 	invoke sprintf,addr loginRequestBuf,addr loginRequestFormat,addr usernameBuf,addr passwordBuf
 	
@@ -1245,6 +1231,7 @@ getLastMessages PROC hWnd:DWORD
 	local message:DWORD
 	local bytesWrite:DWORD
 	local content[BUF_SIZE]:BYTE
+	local isRecv:DWORD
 
 	BZero commandType
 	mov row,0
@@ -1279,7 +1266,7 @@ getLastMessages PROC hWnd:DWORD
 		.if eax==0
 				BZero content
 
-				invoke sscanf,addr responseBuf,addr textResponseFormat,addr content
+				invoke sscanf,addr responseBuf,addr textResponseFormat,addr isRecv,addr content
 
 				invoke addRecvText,addr content,currentMessageHeight
 
@@ -1293,7 +1280,7 @@ getLastMessages PROC hWnd:DWORD
 		.else
 			BZero imageName
 			invoke generateRandomImageName,addr imageName
-			invoke sscanf,addr responseBuf,addr imageResponseFormat,addr imageSize
+			invoke sscanf,addr responseBuf,addr imageResponseFormat,addr isRecv,addr imageSize
 
 			;create image file
 			invoke CreateFile,addr imageName,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL OR FILE_FLAG_WRITE_THROUGH,0
@@ -1330,6 +1317,7 @@ getLastMessages PROC hWnd:DWORD
 	.endw
 
 	mov ebx,currentMessageHeight
+	add ebx,150
 	mov ecx,CLIENT_HEIGHT
 	sub ebx,ecx
 	invoke SetScrollRange,hChatMainWnd, SB_VERT, 0,ebx , TRUE;
@@ -1337,6 +1325,37 @@ getLastMessages PROC hWnd:DWORD
 	INVOKE InvalidateRect,hWnd, NULL, FALSE
 	ret
 getLastMessages ENDP
+
+handleRegister PROC hWnd:DWORD
+	local registerRequestBuf[BUF_SIZE]:BYTE
+	local responseBuf[BUF_SIZE]:BYTE
+
+	BZero registerRequestBuf
+	BZero responseBuf
+
+	INVOKE GetWindowText,hUsernameInput,addr usernameBuf,BUF_SIZE
+	INVOKE GetWindowText,hPasswordInput,addr passwordBuf,BUF_SIZE
+			
+
+	invoke sprintf,addr registerRequestBuf,addr registerRequestFormat,addr usernameBuf,addr passwordBuf
+	
+	invoke lstrlen,addr registerRequestBuf
+	invoke send,client.clientSocket,addr registerRequestBuf,eax,0
+
+	Recv
+	;invoke recv,client.clientSocket,addr responseBuf,BUF_SIZE -1,0
+
+	invoke lstrcmp,addr responseBuf,addr successResponse
+
+	.if eax==0
+		invoke MessageBox,hWnd,addr registerSuccessInfo,addr WindowName,MB_OK
+	.endif
+
+
+	INVOKE InvalidateRect,hWnd, NULL, FALSE
+
+	ret
+handleRegister ENDP
 
 ;-----------------------------------------------------
 WinProc PROC,
@@ -1353,9 +1372,10 @@ WinProc PROC,
 	.ELSEIF eax == WM_CREATE		; create window
 
 	  mov ebx,currentMessageHeight
+	  add ebx,150
 	  mov ecx,CLIENT_HEIGHT
 	  sub ebx,ecx
-	  invoke SetScrollRange,hChatMainWnd, SB_VERT, 0,0 , TRUE;
+	  invoke SetScrollRange,hChatMainWnd, SB_VERT, 0,ebx , TRUE;
 
 	  ; 创建用户名标签
 	  INVOKE CreateWindowEx,NULL,addr StaticClassName,addr UsernameLabelText,
@@ -1378,8 +1398,12 @@ WinProc PROC,
 	  mov hPasswordInput,eax
 
 	  ; 创建按钮
+	  INVOKE CreateWindowEx,NULL,addr ButtonClassName,addr RegisterButtonText,
+	  WS_CHILD OR WS_VISIBLE OR WS_BORDER OR BS_FLAT ,400,300,200,40,hWnd,REGISTER_BUTTON_ID,hInstance,NULL
+	  mov hRegisterButton,eax
+
 	  INVOKE CreateWindowEx,NULL,addr ButtonClassName,addr LoginButtonText,
-	  WS_CHILD OR WS_VISIBLE OR WS_BORDER OR BS_FLAT ,300,300,200,40,hWnd,LOGIN_BUTTON_ID,hInstance,NULL
+		WS_CHILD OR WS_VISIBLE OR WS_BORDER OR BS_FLAT ,150,300,200,40,hWnd,LOGIN_BUTTON_ID,hInstance,NULL
 	  mov hLoginButton,eax
 
 	  jmp WinProcExit
@@ -1392,7 +1416,8 @@ WinProc PROC,
 		mov ebx,wParam
 		.IF bx == LOGIN_BUTTON_ID
 			invoke handleLogin,hWnd
-			
+		.elseif bx == REGISTER_BUTTON_ID
+			invoke handleRegister,hWnd
 		.ELSEIF bx == SEND_IMAGE_BUTTON_ID
 			INVOKE sendImage,hWnd
 
@@ -1419,8 +1444,15 @@ WinProc PROC,
 				
 				mov edx,(NMITEMACTIVATE ptr [ecx]).iItem
 				
+				.if edx == -1
+					INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
+					jmp WinProcExit
+				.endif
+
 				.if receiverId == -1
-					invoke SetTimer,hWnd,TIMER_ID,3000,NULL
+					push edx
+					invoke SetTimer,hWnd,TIMER_ID,4000,NULL
+					pop edx
 				.endif
 
 				INVOKE initChatWindow,hWnd,edx
@@ -1428,6 +1460,7 @@ WinProc PROC,
 				INVOKE initChatSendButton,hWnd
 				INVOKE initChatSendImageButton,hWnd
 				mov ebx,currentMessageHeight
+				add ebx,150
 				mov ecx,CLIENT_HEIGHT
 				sub ebx,ecx
 				invoke SetScrollRange,hChatMainWnd, SB_VERT, 0,ebx , TRUE;
@@ -1495,32 +1528,42 @@ ChatWinProc PROC,
 		push scrollPosition
 		.if bx  == SB_LINEUP
 			sub scrollPosition,10
+			mov debounceControl,10
 		.elseif bx == SB_LINEDOWN
 			add scrollPosition,10
+			mov debounceControl,10
 		.elseif bx == SB_PAGEUP
 			sub scrollPosition,100
+			mov debounceControl,10
 		.elseif bx == SB_PAGEDOWN
 			add scrollPosition,100
+			mov debounceControl,10
 		.elseif bx==SB_THUMBTRACK
 			shr ebx,16
 			mov scrollPosition,ebx
-		.else
+			inc debounceControl
+		.elseif bx ==SB_THUMBPOSITION
 			;INVOKE DefWindowProc, hWnd, localMsg, wParam, lParam
+			mov debounceControl,10
 		.endif
 
 		invoke GetScrollPos,hChatMainWnd,SB_VERT
 		.if eax!= scrollPosition
 			invoke SetScrollPos,hChatMainWnd, SB_VERT, scrollPosition , TRUE
+			pop ecx
+			mov edx,scrollPosition
+			sub ecx,edx
+
+			;invoke ScrollWindow,hChatMainWnd, 0, ecx, NULL, NULL;
+			
+			.if debounceControl >= 10
+				invoke InvalidateRect,hChatMainWnd,NULL,TRUE
+				;invoke UpdateWindow,hChatMainWnd
+				mov debounceControl,0
+			.endif
 		.endif
 
-		pop ecx
-		mov edx,scrollPosition
-		sub ecx,edx
-
-		invoke ScrollWindow,hChatMainWnd, 0, ecx, NULL, NULL;
-		invoke UpdateWindow,hChatMainWnd
-
-		;invoke InvalidateRect,hWnd,NULL,FALSE
+		
 		
 		jmp ChatWinProcExit
 	.ELSE		; other message?
