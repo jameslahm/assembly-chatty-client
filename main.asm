@@ -305,6 +305,11 @@ scrollPosition DWORD 0
 hChatWindow DWORD ?
 
 
+; 是否连接成功
+connectError DWORD 0
+connectErrorInfo BYTE "connect error, please close the client and try again",0
+
+
 ;=================== CODE =========================
 .code
 generateRandomImageName PROC buf:ptr BYTE
@@ -1168,6 +1173,11 @@ handleLogin PROC hWnd:DWORD
 	BZero loginRequestBuf
 	BZero responseBuf
 
+	.if connectError == 1
+		invoke MessageBox,hWnd,addr connectErrorInfo,addr WindowName,MB_OK
+		jmp handleLoginExit
+	.endif
+
 	INVOKE GetWindowText,hUsernameInput,addr usernameBuf,BUF_SIZE
 	INVOKE GetWindowText,hPasswordInput,addr passwordBuf,BUF_SIZE
 
@@ -1207,6 +1217,7 @@ handleLogin PROC hWnd:DWORD
 		invoke MessageBox,hWnd,addr loginErrorInfo,addr WindowName,MB_OK
 	.endif
 
+handleLoginExit:
 	ret
 handleLogin ENDP
 
@@ -1233,6 +1244,10 @@ initClient PROC
 	invoke inet_addr,addr localIP
 	mov @sock_addr.sin_addr,eax
 	invoke connect,client.clientSocket,addr @sock_addr,sizeof @sock_addr
+
+	.if eax !=0
+		mov connectError,1
+	.endif
 
 	ret
 initClient ENDP
@@ -1415,6 +1430,11 @@ handleRegister PROC hWnd:DWORD
 	BZero registerRequestBuf
 	BZero responseBuf
 
+	.if connectError == 1
+		invoke MessageBox,hWnd,addr connectErrorInfo,addr WindowName,MB_OK
+		jmp handleRegisterExit
+	.endif
+
 	INVOKE GetWindowText,hUsernameInput,addr usernameBuf,BUF_SIZE
 	INVOKE GetWindowText,hPasswordInput,addr passwordBuf,BUF_SIZE
 			
@@ -1436,6 +1456,7 @@ handleRegister PROC hWnd:DWORD
 
 	INVOKE InvalidateRect,hWnd, NULL, FALSE
 
+handleRegisterExit:
 	ret
 handleRegister ENDP
 
