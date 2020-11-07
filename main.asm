@@ -152,7 +152,7 @@ GreetText  BYTE "This window is shown immediately after "
 CloseMsg   BYTE "WM_CLOSE message received",0
 
 ErrorTitle  BYTE "Error",0
-WindowName  BYTE "ASM Windows App",0
+WindowName  BYTE "Chatty",0
 className   BYTE "ASMWin",0
 chatClassName BYTE "CHATWIN",0
 
@@ -309,6 +309,9 @@ hChatWindow DWORD ?
 connectError DWORD 0
 connectErrorInfo BYTE "connect error, please close the client and try again",0
 
+; 
+FAKE_SEED DWORD 0
+
 
 ;=================== CODE =========================
 .code
@@ -336,6 +339,30 @@ generateRandomImageName PROC buf:ptr BYTE
 
 		dec count
 	.endw
+
+	invoke srand,FAKE_SEED
+
+	mov count,10
+	.while count>=1
+		invoke rand
+		mov edx,0
+		mov ecx,26
+		div ecx
+		mov eax,edx
+		add eax,61h
+		
+		mov ecx,buf
+		add ecx,10
+
+		mov edx,count
+		mov ebx,10
+		sub ebx,edx
+		mov [ecx+ebx],al
+
+		dec count
+	.endw
+
+	inc FAKE_SEED
 
 	inc ebx
 	mov eax,02eh
